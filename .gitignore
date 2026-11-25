@@ -1,0 +1,15 @@
+# Dependencies and temporary files
+node_modules/
+npm-debug.log*
+.DS_Store
+.vscode/
+*.tsbuildinfo
+
+# Never commit user vault data, FIT conflict files or local test vaults
+.obsidian/
+_fit/
+vault/
+test-vault/
+local-vault/
+*.backup
+*.bak
