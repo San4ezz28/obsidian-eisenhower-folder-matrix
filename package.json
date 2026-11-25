@@ -3,6 +3,8 @@
   "version": "0.1.4",
   "private": true,
   "description": "Portable markdown Eisenhower matrices for Obsidian",
+  "author": "San4ezz28",
+  "license": "MIT",
   "scripts": {
     "build": "tsc --noEmit --skipLibCheck && node scripts/build.cjs",
     "bundle": "node scripts/build.cjs",
