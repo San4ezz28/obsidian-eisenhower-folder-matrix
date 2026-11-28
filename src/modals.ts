@@ -147,8 +147,8 @@ export class MatrixFormModal extends Modal {
 
     const updateSourceRows = (): void => {
       const folderMode = type === "folder";
-      recursiveRow.settingEl.style.display = folderMode ? "" : "none";
-      taskFileRow.settingEl.style.display = folderMode ? "" : "none";
+      recursiveRow.settingEl.toggleClass("em-setting-hidden", !folderMode);
+      taskFileRow.settingEl.toggleClass("em-setting-hidden", !folderMode);
       sourceInput.setPlaceholder(folderMode ? tr("chooseFolder") : tr("chooseFile"));
     };
     updateSourceRows();
@@ -242,12 +242,20 @@ export class TaskInputModal extends Modal {
 }
 
 export class ConfirmDeleteModal extends Modal {
-  constructor(app: App, private taskText: string, private onConfirm: () => Promise<void>, private language: LanguageSetting = "auto") { super(app); }
+  constructor(
+    app: App,
+    private taskText: string,
+    private onConfirm: () => Promise<void>,
+    private language: LanguageSetting = "auto",
+    private childCount = 0
+  ) { super(app); }
   onOpen(): void {
     this.contentEl.empty();
     const tr = (key: TranslationKey) => t(key, this.language);
     this.contentEl.createEl("h2", { text: tr("deleteConfirm") });
-    this.contentEl.createEl("p", { text: t("deleteDescription", this.language, {text: this.taskText}) });
+    const text = this.childCount > 0 ? `${this.taskText} [${this.childCount}]` : this.taskText;
+    this.contentEl.createEl("p", { text: t("deleteDescription", this.language, {text}) });
+    if (this.childCount > 0) this.contentEl.setAttribute("data-child-count", String(this.childCount));
     new Setting(this.contentEl).addButton(b => b.setButtonText(tr("deleteLine")).setWarning().onClick(async () => {
       try { await this.onConfirm(); this.close(); } catch (e) { showError(e); }
     })).addButton(b => b.setButtonText(tr("cancel")).onClick(() => this.close()));

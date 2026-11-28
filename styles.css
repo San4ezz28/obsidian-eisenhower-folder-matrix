@@ -85,3 +85,7 @@
   .em-card { flex-wrap:nowrap; }
   .em-card-menu { min-width:40px; min-height:40px; }
 }
+
+/* Folder-only settings rows. Class instead of inline display, including Obsidian's .setting-item. */
+.em-setting-hidden,
+.setting-item.em-setting-hidden { display: none; }

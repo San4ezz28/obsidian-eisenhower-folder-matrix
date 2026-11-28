@@ -1,5 +1,5 @@
-import { App, MarkdownRenderChild, MarkdownRenderer, Menu, Notice, TFile } from "obsidian";
-import { getTaskZone, isPathInside, moveAssignment, orderedTasks } from "./core";
+import { App, Component, MarkdownRenderChild, MarkdownRenderer, Menu, Notice, TFile } from "obsidian";
+import { getTaskZone, isPathInside, moveAssignment, normalizeVaultPath, orderedTasks } from "./core";
 import { ConfirmDeleteModal, MatrixFormModal, TaskInputModal } from "./modals";
 import { MatrixStore } from "./store";
 import { MatrixConfig, Quadrant, QUADRANTS, Task, Zone, ZONES } from "./types";
@@ -17,10 +17,14 @@ export class MatrixView extends MarkdownRenderChild {
   private config: MatrixConfig | undefined;
   private tasks: Task[] = [];
   private active: Quadrant = "do";
-  private busy = false;
+  private actionTail: Promise<void> = Promise.resolve();
+  private actionDepth = 0;
+  private unloaded = false;
   private completedOpen = false;
   private serial = 0;
   private seenDuplicateIds = new Set<string>();
+  /** One parent for MarkdownRenderer children of the current draw. Replaced on each render. */
+  private renderComponent = new Component();
   private tr(key: TranslationKey, params: Record<string, string | number> = {}): string {
     return t(key, this.config?.language || "auto", params);
   }
@@ -31,37 +35,60 @@ export class MatrixView extends MarkdownRenderChild {
   }
 
   onload(): void {
-    this.registerEvent(this.host.app.vault.on("modify", () => this.scheduleRefresh()));
-    this.registerEvent(this.host.app.vault.on("create", () => this.scheduleRefresh()));
-    this.registerEvent(this.host.app.vault.on("delete", () => this.scheduleRefresh()));
-    this.registerEvent(this.host.app.vault.on("rename", () => this.scheduleRefresh()));
+    this.registerEvent(this.host.app.vault.on("modify", file => { this.onVaultFile(file); }));
+    this.registerEvent(this.host.app.vault.on("create", file => { this.onVaultFile(file); }));
+    this.registerEvent(this.host.app.vault.on("delete", file => { this.onVaultFile(file); }));
+    this.registerEvent(this.host.app.vault.on("rename", (file, oldPath) => { this.onVaultFile(file, oldPath); }));
     void this.refresh();
   }
   onunload(): void {
+    this.unloaded = true;
     this.serial++;
     if (this.timer !== undefined) window.clearTimeout(this.timer);
+    this.timer = undefined;
+    this.renderComponent.unload();
+  }
+  /** Matrix note, configured source, or a still-unloaded config. Rename checks both paths. */
+  private onVaultFile(file: { path: string } | null | undefined, oldPath?: string): void {
+    if (this.pathAffectsView(file?.path) || (oldPath !== undefined && this.pathAffectsView(oldPath)))
+      this.scheduleRefresh();
+  }
+  private pathAffectsView(path: string | undefined): boolean {
+    if (!this.config || path === undefined) return true;
+    if (path === this.file?.path || path === this.preferredPath) return true;
+    const source = this.config.source;
+    if (source.kind === "file") return path === source.path;
+    // isPathInside is false for the folder path itself. Creating, deleting, or renaming that folder still refreshes.
+    return normalizeVaultPath(path) === normalizeVaultPath(source.path)
+      || isPathInside(path, source.path, source.recursive);
   }
   private scheduleRefresh(delay = 200): void {
+    if (this.unloaded) return;
     if (this.timer !== undefined) window.clearTimeout(this.timer);
-    this.timer = window.setTimeout(() => { this.timer = undefined; if (!this.busy) void this.refresh(); }, delay);
+    this.timer = window.setTimeout(() => {
+      this.timer = undefined;
+      if (this.unloaded || this.actionDepth > 0) return;
+      void this.refresh();
+    }, delay);
   }
   private async refresh(): Promise<void> {
+    if (this.unloaded) return;
     const serial = ++this.serial;
     try {
       const file = await this.host.store.findMatrix(this.id, this.file?.path || this.preferredPath);
       const config = await this.host.store.loadMatrix(file, this.id);
-      if (serial !== this.serial) return;
+      if (serial !== this.serial || this.unloaded) return;
       this.file = file;
       this.config = config; // Allow source settings to be fixed even if the source is missing.
       const tasks = await this.host.store.loadTasks(config.source);
-      if (serial !== this.serial) return;
+      if (serial !== this.serial || this.unloaded) return;
       this.tasks = tasks;
       const count = new Map<string, number>();
       for (const task of tasks) if (task.anchor) count.set(task.anchor, (count.get(task.anchor) || 0) + 1);
       this.seenDuplicateIds = new Set([...count].filter(([, n]) => n > 1).map(([id]) => id));
       this.render();
     } catch (e) {
-      if (serial !== this.serial) return;
+      if (serial !== this.serial || this.unloaded) return;
       this.root.empty();
       const error = this.root.createDiv({ cls: "em-error" });
       error.createEl("strong", { text: this.tr("matrixLoadError") });
@@ -83,12 +110,18 @@ export class MatrixView extends MarkdownRenderChild {
     console.error("[Eisenhower Folder Matrix]", error);
     new Notice(error instanceof Error ? error.message : String(error), 8000);
   }
-  private async action(operation: () => Promise<void>): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
-    try { await operation(); }
-    catch (e) { this.notify(e); }
-    finally { this.busy = false; this.scheduleRefresh(70); }
+  private action(operation: () => Promise<void>): Promise<void> {
+    this.actionDepth++;
+    const job = this.actionTail.then(async () => {
+      try { await operation(); }
+      catch (e) { this.notify(e); }
+      finally {
+        this.actionDepth--;
+        if (this.actionDepth === 0) this.scheduleRefresh(70);
+      }
+    });
+    this.actionTail = job.then(() => undefined, () => undefined);
+    return job;
   }
   private requireConfig(): { config: MatrixConfig; file: TFile } {
     if (!this.file || !this.config) throw new Error(this.tr("configNotLoaded"));
@@ -104,7 +137,9 @@ export class MatrixView extends MarkdownRenderChild {
       const { file } = this.requireConfig();
       let id: string;
       try {
-        id = task.anchor || await this.host.store.editTask(task, {});
+        // Anchored lines keep Task.id as the matrix key (path#^id for a foreign anchor).
+        // A quadrant move must not rewrite a line that already has its anchor.
+        id = task.anchor ? task.id : await this.host.store.editTask(task, {});
       } catch (error) {
         throw new Error(this.tr("attachTaskError", {error: error instanceof Error ? error.message : String(error)}));
       }
@@ -122,10 +157,11 @@ export class MatrixView extends MarkdownRenderChild {
       const id = await this.host.store.editTask(task, change);
       if (change.remove) {
         const { file } = this.requireConfig();
+        const keys = new Set([task.id, id]);
         await this.host.store.updateMatrix(file, this.id, current => {
           const next = { ...current, assignments: {...current.assignments}, order: {...current.order} };
-          delete next.assignments[id];
-          for (const zone of ZONES) next.order[zone] = next.order[zone].filter(x => x !== id);
+          for (const key of keys) delete next.assignments[key];
+          for (const zone of ZONES) next.order[zone] = next.order[zone].filter(x => !keys.has(x));
           return next;
         });
       }
@@ -166,6 +202,9 @@ export class MatrixView extends MarkdownRenderChild {
     }).open();
   }
   private render(): void {
+    this.renderComponent.unload();
+    this.renderComponent = new Component();
+    this.renderComponent.load();
     const config = this.config!;
     const root = this.root;
     root.empty();
@@ -241,9 +280,10 @@ export class MatrixView extends MarkdownRenderChild {
       .onClick(() => this.editTask(task)));
     menu.addItem(item => item.setTitle(this.tr("openSource")).setIcon("file-text")
       .onClick(() => { void this.host.openTask(task).catch(err => this.notify(err)); }));
+    const childCount = this.tasks.filter(t => t.parentId === task.id).length;
     menu.addItem(item => item.setTitle(this.tr("deleteTask")).setIcon("trash-2")
       .onClick(() => new ConfirmDeleteModal(this.host.app, task.text,
-        () => this.changeTask(task, {remove: true}), this.config?.language).open()));
+        () => this.changeTask(task, {remove: true}), this.config?.language, childCount).open()));
     menu.showAtMouseEvent(event);
   }
 
@@ -270,17 +310,17 @@ export class MatrixView extends MarkdownRenderChild {
       });
     } else row.createSpan({ text: "•", cls: "em-grip-muted" });
 
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
+    const checkbox = row.createEl("input", {
+      type: "checkbox",
+      attr: { "aria-label": task.done ? this.tr("markOpen") : this.tr("markDone") }
+    });
     checkbox.checked = task.done;
-    checkbox.setAttribute("aria-label", task.done ? this.tr("markOpen") : this.tr("markDone"));
-    row.appendChild(checkbox);
     this.bind(checkbox, "change", () => void this.changeTask(task, {done: checkbox.checked}));
 
     const content = row.createDiv({ cls: "em-card-content" });
     const textEl = content.createDiv({ cls: "em-card-text" });
     // Render links, bold text and Obsidian ==highlights== as Markdown, not raw markers.
-    void MarkdownRenderer.render(this.host.app, task.text, textEl, task.path, this)
+    void MarkdownRenderer.render(this.host.app, task.text, textEl, task.path, this.renderComponent)
       .catch(() => { textEl.setText(task.text); });
     const basename = task.path.split("/").pop() || task.path;
     const sourceLabel = task.group ? `${task.group} · ${basename}` : basename;
@@ -305,12 +345,25 @@ export class MatrixView extends MarkdownRenderChild {
   private renderCompleted(root: HTMLElement): void {
     const done = this.tasks.filter(t => t.done).sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
     const details = root.createEl("details", { cls: "em-completed" });
-    details.open = this.completedOpen; // false by default, remember user's toggle while view is open
-    this.bind(details, "toggle", () => { this.completedOpen = details.open; });
     const summary = details.createEl("summary");
     summary.createSpan({ text: "✓ " + this.tr("completed", {count: done.length}) });
-    if (!done.length) details.createDiv({ text: this.tr("noCompleted"), cls: "em-empty" });
-    const list = details.createDiv({ cls: "em-completed-list" });
-    for (const task of done) this.makeCard(list, task, 0);
+    let rendered = false;
+    const showDone = (): void => {
+      if (rendered) return;
+      rendered = true;
+      if (!done.length) {
+        details.createDiv({ text: this.tr("noCompleted"), cls: "em-empty" });
+        return;
+      }
+      const list = details.createDiv({ cls: "em-completed-list" });
+      for (const task of done) this.makeCard(list, task, 0);
+    };
+    // Remember the open state, but skip Markdown cards until the section is actually open.
+    this.bind(details, "toggle", () => {
+      this.completedOpen = details.open;
+      if (details.open) showDone();
+    });
+    details.open = this.completedOpen;
+    if (details.open) showDone();
   }
 }

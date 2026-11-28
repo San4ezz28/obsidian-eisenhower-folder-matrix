@@ -5,7 +5,7 @@ const path = require('path');
 const ts = require('typescript');
 const root = path.join(__dirname, '..');
 const modules = fs.readdirSync(path.join(root,'src')).filter(f=>f.endsWith('.ts'));
-let out = `/* Eisenhower Folder Matrix 0.1.4 – generated. Do not edit. */\nconst __modules = {\n`;
+let out = `/* Eisenhower Folder Matrix 0.2.0 – generated. Do not edit. */\nconst __modules = {\n`;
 for (const name of modules) {
   const entry = 'src/' + name;
   const src = fs.readFileSync(path.join(root, entry), 'utf8');

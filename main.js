@@ -1,4 +1,4 @@
-/* Eisenhower Folder Matrix 0.1.4 – generated. Do not edit. */
+/* Eisenhower Folder Matrix 0.2.0 – generated. Do not edit. */
 const __modules = {
 "src/core.ts": function(module, exports, require) {
 "use strict";
@@ -34,8 +34,54 @@ function splitQuotePrefix(line) {
     const prefix = /^([ \t]*(?:>[ \t]?)+)/.exec(line)?.[1] || "";
     return { prefix, body: line.slice(prefix.length) };
 }
-const BLOCK_ID = /\s+\^(em-[a-z0-9-]{8,64})\s*$/i;
 const MATRIX_FENCE = /(^|\n)(```eisenhower-matrix[ \t]*\r?\n)([\s\S]*?)(\r?\n```)(?=\r?\n|$)/g;
+const MATRIX_KEYS = ["version", "id", "source", "inboxFile", "subtasks", "language", "assignments", "order"];
+const SOURCE_KEYS = ["kind", "path", "recursive"];
+// ^em- ids are anchors anywhere on the line. Any other ^token of 4-64 id characters is a
+// foreign Obsidian block id only when it is the last token (trailing whitespace allowed).
+const BLOCK_TOKEN = /(?:^|[ \t])(\^([A-Za-z0-9-]{4,67}))(?=[ \t]|$)/g;
+const EM_ANCHOR = /^em-[a-z0-9-]{8,64}$/i;
+const FOREIGN_ANCHOR = /^[A-Za-z0-9-]{4,64}$/;
+function blockTokens(text) {
+    const tokens = [];
+    const re = new RegExp(BLOCK_TOKEN.source, "g");
+    let match;
+    while ((match = re.exec(text)) !== null) {
+        const id = match[2];
+        const em = EM_ANCHOR.test(id);
+        if (!em && !FOREIGN_ANCHOR.test(id))
+            continue;
+        const start = match.index + match[0].length - match[1].length;
+        tokens.push({ id, em, start, end: start + match[1].length });
+    }
+    return tokens;
+}
+function textWithoutToken(text, token) {
+    const before = text.slice(0, token.start).replace(/[ \t]+$/, "");
+    const after = text.slice(token.end).replace(/^[ \t]+/, "");
+    return (before && after ? `${before} ${after}` : before || after).trim();
+}
+// Obsidian treats a block id as a reference only at the end of the line.
+function trailingForeign(text, tokens) {
+    const found = tokens.filter(token => !token.em && /^[ \t]*$/.test(text.slice(token.end)));
+    return found.length === 1 ? found[0] : null;
+}
+function unknownKeys(value, known) {
+    return Object.keys(value).filter(key => !known.includes(key)).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+}
+function assignUnknown(target, source, known) {
+    const bag = source;
+    for (const key of unknownKeys(source, known))
+        target[key] = bag[key];
+}
+// `.` / `..` / empty segments are traversal. A leading dot hides vault metadata such as .obsidian.
+// _fit and other scan exclusions are intentionally not rejected here.
+function unsafeVaultPath(normalized) {
+    const segments = normalized.split("/");
+    if (segments.some(segment => segment === "" || segment === "." || segment === ".."))
+        return true;
+    return segments[0].startsWith(".");
+}
 function normalizeVaultPath(path) {
     return path.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").replace(/\/+/g, "/");
 }
@@ -45,17 +91,34 @@ function isPathInside(path, folder, recursive) {
     return Boolean(f) && p.startsWith(f + "/") && (recursive || !p.slice(f.length + 1).includes("/"));
 }
 function validSource(source) {
-    return Boolean(source.path && normalizeVaultPath(source.path)) &&
-        (source.kind === "folder" || (source.kind === "file" && source.path.toLowerCase().endsWith(".md")));
+    const path = source?.path ? normalizeVaultPath(source.path) : "";
+    if (!path || unsafeVaultPath(path))
+        return false;
+    return source.kind === "folder" || (source.kind === "file" && source.path.toLowerCase().endsWith(".md"));
+}
+function orderedSource(source, path, recursive) {
+    const ordered = { kind: source.kind, path, recursive };
+    assignUnknown(ordered, source, SOURCE_KEYS);
+    return ordered;
 }
 function createMatrix(source, subtasks = "nested", inboxFile = "", language = "auto") {
+    const normalized = { ...source, path: normalizeVaultPath(source.path) };
+    if (!validSource(normalized))
+        throw new Error((0, i18n_1.t)("invalidSource"));
     return {
-        version: 1, id: (0, types_1.newId)(), source: { ...source, path: normalizeVaultPath(source.path) },
+        version: 1, id: (0, types_1.newId)(), source: normalized,
         inboxFile: normalizeVaultPath(inboxFile), subtasks, language, assignments: {}, order: (0, types_1.emptyOrder)()
     };
 }
 function encodeMatrix(matrix) {
-    return JSON.stringify(matrix, null, 2);
+    const ordered = {
+        version: matrix.version, id: matrix.id,
+        source: orderedSource(matrix.source, matrix.source.path, matrix.source.recursive),
+        inboxFile: matrix.inboxFile, subtasks: matrix.subtasks, language: matrix.language,
+        assignments: matrix.assignments, order: matrix.order
+    };
+    assignUnknown(ordered, matrix, MATRIX_KEYS);
+    return JSON.stringify(ordered, null, 2);
 }
 function makeMatrixNote(matrix) {
     return `# ${(0, i18n_1.t)("matrixTitle", matrix.language)}\n\n${matrixHelpCallout(matrix.language)}\n\n\`\`\`${exports.FENCE}\n${encodeMatrix(matrix)}\n\`\`\`\n`;
@@ -108,12 +171,14 @@ function validateMatrix(value) {
             throw new Error((0, i18n_1.t)("invalidOrder"));
         order[zone] = seq ?? [];
     }
-    return {
+    const ordered = {
         version: 1, id: obj.id,
-        source: { kind: obj.source.kind, path: normalizeVaultPath(obj.source.path), recursive: Boolean(obj.source.recursive) },
+        source: orderedSource(obj.source, normalizeVaultPath(obj.source.path), Boolean(obj.source.recursive)),
         inboxFile: normalizeVaultPath(String(obj.inboxFile || "")),
         subtasks: obj.subtasks, language: obj.language ?? "auto", assignments: { ...obj.assignments }, order
     };
+    assignUnknown(ordered, obj, MATRIX_KEYS);
+    return ordered;
 }
 function decodeMatrix(text) {
     try {
@@ -135,6 +200,8 @@ function readMatrixBlocks(content) {
 }
 function replaceMatrixBlock(content, id, transform) {
     let matches = 0;
+    // A note that already uses CRLF keeps CRLF inside the replaced JSON. Bytes outside the fence stay as they were.
+    const eol = content.includes("\r\n") ? "\r\n" : "\n";
     const replaced = content.replace(new RegExp(MATRIX_FENCE.source, "g"), (full, first, startFence, data, endFence) => {
         const value = decodeMatrix(data); // refuse to write when any matrix block is malformed
         if (value.id !== id)
@@ -143,7 +210,8 @@ function replaceMatrixBlock(content, id, transform) {
         const next = validateMatrix(transform(value));
         if (next.id !== id)
             throw new Error((0, i18n_1.t)("immutableId"));
-        return first + startFence + encodeMatrix(next) + endFence;
+        const json = eol === "\n" ? encodeMatrix(next) : encodeMatrix(next).replace(/\n/g, eol);
+        return first + startFence + json + endFence;
     });
     if (matches !== 1)
         throw new Error((0, i18n_1.t)("notUniqueMatrix"));
@@ -155,12 +223,34 @@ function parseTaskLine(line) {
     const match = TASK_LINE.exec(body);
     if (!match)
         return null;
-    const end = BLOCK_ID.exec(match[6]);
+    const rawText = match[6];
+    const tokens = blockTokens(rawText);
+    const em = tokens.filter(token => token.em);
+    const foreign = trailingForeign(rawText, tokens);
+    // Exactly one ^em- is the anchor even beside a foreign token; only that em token leaves the display text.
+    // Two or more ^em- tokens are ambiguous, so the raw text stays intact and there is no anchor.
+    let text = rawText.trim();
+    let anchor = null;
+    if (em.length === 1) {
+        anchor = em[0].id.toLowerCase();
+        text = textWithoutToken(rawText, em[0]);
+    }
+    else if (em.length === 0 && foreign) {
+        anchor = foreign.id;
+        text = textWithoutToken(rawText, foreign);
+    }
     return {
-        text: (end ? match[6].slice(0, end.index) : match[6]).trim(),
-        done: match[4].toLowerCase() === "x",
-        indent: indentOf(match[1]), anchor: end ? end[1].toLowerCase() : null
+        text, done: match[4].toLowerCase() === "x",
+        indent: indentOf(match[1]), anchor
     };
+}
+function stableTaskId(path, anchor, line, raw) {
+    if (!anchor)
+        return ephemeralId(path, line, raw);
+    // ^em- ids are unique across the vault. A foreign block id is unique only inside one file.
+    if (EM_ANCHOR.test(anchor))
+        return anchor;
+    return `${path}#^${anchor}`;
 }
 function ephemeralId(path, line, raw) {
     // Coordinates only identify unclassified tasks until a stable block ID is assigned.
@@ -169,19 +259,97 @@ function ephemeralId(path, line, raw) {
         hash = Math.imul(hash ^ raw.charCodeAt(i), 16777619);
     return `u:${encodeURIComponent(path)}:${line}:${(hash >>> 0).toString(36)}`;
 }
+function hasClosingFrontmatter(lines) {
+    if (lines[0]?.trim() !== "---")
+        return false;
+    for (let i = 1; i < lines.length; i++)
+        if (/^(---|\.\.\.)\s*$/.test(lines[i]))
+            return true;
+    return false;
+}
+function fenceMarker(body) {
+    // Indent is unlimited: a fence nested in a list is often four or more spaces in.
+    const marker = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(body);
+    if (!marker)
+        return null;
+    return { char: marker[2][0], size: marker[2].length, rest: marker[3] };
+}
+function leadingIndent(line) {
+    return indentOf(/^([ \t]*)/.exec(line)?.[1] ?? "");
+}
+function isQuoteLine(line) {
+    return /^\s*>/.test(line);
+}
+// A real paragraph at column 0 ends the open list. Blank lines do not.
+function breaksParentStack(line) {
+    return line.trim() !== "" && !isQuoteLine(line) && leadingIndent(line) === 0;
+}
+function closingBacktick(line, open, size) {
+    for (let j = open + size; j < line.length; j++) {
+        if (line[j] !== "`")
+            continue;
+        let n = 0;
+        while (j + n < line.length && line[j + n] === "`")
+            n++;
+        if (n === size)
+            return j;
+        j += n - 1;
+    }
+    return -1;
+}
+function maskPercentComments(line, inComment) {
+    let visible = "";
+    let i = 0;
+    while (i < line.length) {
+        // %% inside a matched inline code span is not a comment marker.
+        if (!inComment && line[i] === "`") {
+            let size = 1;
+            while (i + size < line.length && line[i + size] === "`")
+                size++;
+            const close = closingBacktick(line, i, size);
+            if (close >= 0) {
+                const end = close + size;
+                visible += line.slice(i, end);
+                i = end;
+                continue;
+            }
+            visible += "`";
+            i++;
+            continue;
+        }
+        if (i + 1 < line.length && line[i] === "%" && line[i + 1] === "%") {
+            inComment = !inComment;
+            i += 2;
+            continue;
+        }
+        if (!inComment)
+            visible += line[i];
+        i++;
+    }
+    return { visible, inComment };
+}
 function scanMarkdown(content, path) {
     const lines = content.split(/\r?\n/);
     const tasks = [];
     const parents = [];
     let fence = null;
-    let frontmatter = lines[0]?.trim() === "---";
+    // A leading --- is frontmatter only when a closing --- or ... exists. Otherwise it is a rule.
+    let frontmatter = hasClosingFrontmatter(lines);
     let htmlComment = false;
+    let percentComment = false;
     let calloutGroup;
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (frontmatter) {
             if (i !== 0 && /^(---|\.\.\.)\s*$/.test(line))
                 frontmatter = false;
+            continue;
+        }
+        const { body } = splitQuotePrefix(line);
+        if (fence) {
+            const marker = fenceMarker(body);
+            if (marker && marker.char === fence.char && marker.size >= fence.size && !marker.rest.trim())
+                fence = null;
             continue;
         }
         if (htmlComment) {
@@ -193,19 +361,22 @@ function scanMarkdown(content, path) {
             htmlComment = !line.includes("-->");
             continue;
         }
-        // Code fences inside blockquotes must not generate fake tasks.
-        const { body } = splitQuotePrefix(line);
-        const marker = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(body);
+        // %% comments, including multiline ones, are not tasks and must not toggle fences.
+        const masked = maskPercentComments(line, percentComment);
+        const hidden = (percentComment || line.includes("%%")) && masked.visible.trim() === "";
+        percentComment = masked.inComment;
+        if (hidden)
+            continue;
+        const marker = fenceMarker(body);
         if (marker) {
-            if (!fence)
-                fence = { char: marker[1][0], size: marker[1].length };
-            else if (marker[1][0] === fence.char && marker[1].length >= fence.size && !marker[2].trim())
-                fence = null;
+            fence = { char: marker.char, size: marker.size };
+            if (!isQuoteLine(line))
+                calloutGroup = undefined;
+            if (breaksParentStack(line))
+                parents.length = 0;
             continue;
         }
-        if (fence)
-            continue;
-        // Preserve the category for tasks inside the user's callout sections.
+        // Callout labels apply only inside that blockquote. A later plain line or heading drops the label.
         const callout = /^\s*\[![^\]]+\][+-]?\s*(.*)$/.exec(body);
         if (callout) {
             parents.length = 0;
@@ -213,19 +384,26 @@ function scanMarkdown(content, path) {
         }
         else if (/^\s*#{1,6}\s/.test(body)) {
             parents.length = 0;
+            calloutGroup = undefined;
+        }
+        else if (!isQuoteLine(line)) {
+            calloutGroup = undefined;
         }
         const parsed = parseTaskLine(line);
-        if (!parsed)
+        if (!parsed) {
+            if (breaksParentStack(line))
+                parents.length = 0;
             continue;
+        }
         while (parents.length && parents[parents.length - 1].indent >= parsed.indent)
             parents.pop();
         // Blank checkboxes in templates are placeholders, not actionable tasks.
         if (!parsed.text.trim())
             continue;
         const task = {
-            id: parsed.anchor || ephemeralId(path, i, line), anchor: parsed.anchor,
+            id: stableTaskId(path, parsed.anchor, i, line), anchor: parsed.anchor,
             path, line: i, raw: line, text: parsed.text, done: parsed.done,
-            group: /^\s*>/.test(line) ? calloutGroup : undefined,
+            group: isQuoteLine(line) ? calloutGroup : undefined,
             indent: parsed.indent, parentId: parents.length ? parents[parents.length - 1].id : null
         };
         tasks.push(task);
@@ -271,6 +449,9 @@ function replaceLine(data, line, replacement) {
     const next = replacement === null ? "" : replacement + end;
     return data.slice(0, m.index) + next + data.slice(m.index + m[0].length);
 }
+function formatTaskLine(prefix, match, done, text, anchor) {
+    return `${prefix}${match[1]}${match[2]}${match[3]}[${done ? "x" : " "}]${match[5]}${text.trim()} ^${anchor}`;
+}
 function rewriteTaskLine(raw, done, text, id) {
     const { prefix, body } = splitQuotePrefix(raw);
     const match = TASK_LINE.exec(body);
@@ -278,12 +459,27 @@ function rewriteTaskLine(raw, done, text, id) {
         throw new Error((0, i18n_1.t)("lineNotTask"));
     if (!text.trim() || /[\r\n]/.test(text))
         throw new Error((0, i18n_1.t)("taskMustOneLine"));
-    const oldAnchor = BLOCK_ID.exec(match[6]);
-    if (oldAnchor && oldAnchor[1].toLowerCase() !== id)
-        throw new Error((0, i18n_1.t)("taskIdChanged"));
-    if (!oldAnchor && /\s+\^[a-z0-9-]{4,64}\s*$/i.test(match[6]))
+    // A caret-word already in the display text may stay, and removing one is allowed.
+    // A new ^word or ^em- token would sit beside the anchor and drop it, so reject before writing.
+    const display = parseTaskLine(raw)?.text ?? "";
+    const kept = new Set(blockTokens(display).map(token => token.id));
+    if (blockTokens(text).some(token => !kept.has(token.id)))
         throw new Error((0, i18n_1.t)("differentBlockId"));
-    return `${prefix}${match[1]}${match[2]}${match[3]}[${done ? "x" : " "}]${match[5]}${text.trim()} ^${id}`;
+    const rawText = match[6];
+    const tokens = blockTokens(rawText);
+    const em = tokens.filter(token => token.em);
+    const foreign = trailingForeign(rawText, tokens);
+    if (em.length > 1)
+        throw new Error((0, i18n_1.t)("taskIdChanged"));
+    if (em.length === 1) {
+        if (em[0].id.toLowerCase() !== id.toLowerCase())
+            throw new Error((0, i18n_1.t)("taskIdChanged"));
+        return formatTaskLine(prefix, match, done, text, em[0].id.toLowerCase());
+    }
+    // A trailing foreign block id is the anchor. Do not append a second ^em- id beside it.
+    if (foreign)
+        return formatTaskLine(prefix, match, done, text, foreign.id);
+    return formatTaskLine(prefix, match, done, text, id);
 }
 
 },
@@ -304,6 +500,7 @@ exports.EN = {
     retry: "Retry",
     editSource: "Edit source",
     renamePathError: "Couldn't update matrix path: {error}",
+    renamePartial: "Couldn't update every matrix path after the rename: {error}",
     sourceNotFound: "Source note not found.",
     configNotLoaded: "Matrix hasn't loaded yet.",
     duplicateId: "Duplicate block ID found. Fix duplicates in the source notes first.",
@@ -405,6 +602,7 @@ exports.EN = {
     matrixMissing: "The matrix note was not found. It may have been deleted.",
     matrixDuplicate: "Multiple matrices share the same ID. Rename or create a distinct matrix.",
     matrixCorrupt: "Matrix configuration is missing or corrupted. Check its JSON block.",
+    matrixDamaged: "The matrix note is damaged (broken JSON or a sync conflict) and was not changed.",
     sourcePathInvalid: "Enter a valid task source path.",
     fileMissing: "File not found: {path}",
     folderMissing: "Folder not found: {path}",
@@ -412,6 +610,8 @@ exports.EN = {
     taskChanged: "The task has changed or matches multiple lines. Refresh and try again.",
     taskIdMismatch: "Task ID mismatch.",
     singleLineTask: "Write the task text on one line.",
+    blockTokenInText: "The task text contains a block ID ({token}) and was not added.",
+    taskNotVisibleAfterAdd: "The new task would be hidden inside an unclosed code block or comment, so it was not added.",
     selectExistingTaskFile: "Choose an existing Markdown note for the new task.",
     taskFileOutside: "The task file must be inside the selected source folder.",
     existingFileMissing: "Choose an existing Markdown note: {path}",
@@ -433,6 +633,7 @@ exports.RU = {
     retry: "Повторить",
     editSource: "Изменить источник",
     renamePathError: "Не удалось обновить путь матрицы: {error}",
+    renamePartial: "Не удалось обновить пути всех матриц после переименования: {error}",
     sourceNotFound: "Исходный файл не найден.",
     configNotLoaded: "Матрица пока не загружена.",
     duplicateId: "Найден повторяющийся block ID. Сначала исправь дубликаты в исходных заметках.",
@@ -534,6 +735,7 @@ exports.RU = {
     matrixMissing: "Файл матрицы не найден. Возможно, его удалили.",
     matrixDuplicate: "В vault несколько матриц с одинаковым ID. Переименуй или создай отдельную матрицу.",
     matrixCorrupt: "Конфигурация матрицы отсутствует или повреждена. Проверь JSON в заметке.",
+    matrixDamaged: "Заметка матрицы повреждена (битый JSON или конфликт синхронизации) и не была изменена.",
     sourcePathInvalid: "Укажи корректный путь к источнику.",
     fileMissing: "Файл не найден: {path}",
     folderMissing: "Папка не найдена: {path}",
@@ -541,6 +743,8 @@ exports.RU = {
     taskChanged: "Задача изменилась или встречается несколько раз. Обнови матрицу и повтори действие.",
     taskIdMismatch: "ID задачи не совпадает.",
     singleLineTask: "Напиши текст задачи в одну строку.",
+    blockTokenInText: "Текст задачи содержит block ID ({token}), поэтому она не добавлена.",
+    taskNotVisibleAfterAdd: "Новая задача оказалась бы внутри незакрытого блока кода или комментария, поэтому она не добавлена.",
     selectExistingTaskFile: "Выберите существующий Markdown-файл для сохранения задачи.",
     taskFileOutside: "Файл для задачи должен находиться внутри выбранной папки.",
     existingFileMissing: "Выберите существующий Markdown-файл: {path}",
@@ -785,8 +989,8 @@ class MatrixFormModal extends obsidian_1.Modal {
             .onClick(() => { taskFile = ""; taskFileInput.setValue(""); }));
         const updateSourceRows = () => {
             const folderMode = type === "folder";
-            recursiveRow.settingEl.style.display = folderMode ? "" : "none";
-            taskFileRow.settingEl.style.display = folderMode ? "" : "none";
+            recursiveRow.settingEl.toggleClass("em-setting-hidden", !folderMode);
+            taskFileRow.settingEl.toggleClass("em-setting-hidden", !folderMode);
             sourceInput.setPlaceholder(folderMode ? tr("chooseFolder") : tr("chooseFile"));
         };
         updateSourceRows();
@@ -889,17 +1093,21 @@ class TaskInputModal extends obsidian_1.Modal {
 }
 exports.TaskInputModal = TaskInputModal;
 class ConfirmDeleteModal extends obsidian_1.Modal {
-    constructor(app, taskText, onConfirm, language = "auto") {
+    constructor(app, taskText, onConfirm, language = "auto", childCount = 0) {
         super(app);
         this.taskText = taskText;
         this.onConfirm = onConfirm;
         this.language = language;
+        this.childCount = childCount;
     }
     onOpen() {
         this.contentEl.empty();
         const tr = (key) => (0, i18n_1.t)(key, this.language);
         this.contentEl.createEl("h2", { text: tr("deleteConfirm") });
-        this.contentEl.createEl("p", { text: (0, i18n_1.t)("deleteDescription", this.language, { text: this.taskText }) });
+        const text = this.childCount > 0 ? `${this.taskText} [${this.childCount}]` : this.taskText;
+        this.contentEl.createEl("p", { text: (0, i18n_1.t)("deleteDescription", this.language, { text }) });
+        if (this.childCount > 0)
+            this.contentEl.setAttribute("data-child-count", String(this.childCount));
         new obsidian_1.Setting(this.contentEl).addButton(b => b.setButtonText(tr("deleteLine")).setWarning().onClick(async () => {
             try {
                 await this.onConfirm();
@@ -923,6 +1131,28 @@ const obsidian_1 = require("obsidian");
 const types_1 = require("./types");
 const i18n_1 = require("./i18n");
 const core_1 = require("./core");
+// Parser anchors: a ^em- id, or any other ^word of 4–64 id characters (65–67 only if it is an em- id).
+const BLOCK_TOKEN = /(?:^|[ \t])(\^([A-Za-z0-9-]{4,67}))(?=[ \t]|$)/g;
+const EM_ANCHOR = /^em-[a-z0-9-]{8,64}$/i;
+const FOREIGN_ANCHOR = /^[A-Za-z0-9-]{4,64}$/;
+function findBlockToken(text) {
+    const re = new RegExp(BLOCK_TOKEN.source, "g");
+    let match;
+    while ((match = re.exec(text)) !== null) {
+        const id = match[2];
+        if (EM_ANCHOR.test(id) || FOREIGN_ANCHOR.test(id))
+            return match[1];
+    }
+    return null;
+}
+// True only for segments under the source root. The source folder itself may be _fit or a dotfolder.
+function excludedBelowSource(filePath, sourcePath) {
+    const file = (0, core_1.normalizeVaultPath)(filePath);
+    const root = (0, core_1.normalizeVaultPath)(sourcePath);
+    if (!root || file === root || !file.startsWith(root + "/"))
+        return false;
+    return file.slice(root.length + 1).split("/").some(segment => segment.toLowerCase() === "_fit" || segment.startsWith("."));
+}
 class MatrixStore {
     constructor(app) {
         this.app = app;
@@ -940,8 +1170,13 @@ class MatrixStore {
         const candidate = this.app.vault.getAbstractFileByPath(preferredPath);
         if (candidate instanceof obsidian_1.TFile && candidate.extension === "md") {
             const content = await this.app.vault.cachedRead(candidate);
-            if ((0, core_1.readMatrixBlocks)(content).some(b => b.matrix.id === id))
+            const decoded = (0, core_1.readMatrixBlocks)(content);
+            if (decoded.some(b => b.matrix.id === id))
                 return candidate;
+            // Preferred note contains the fence, but this block does not decode
+            // (broken JSON or conflict markers). Do not scan the vault or rewrite the file.
+            if (this.damagedMatrixFence(content, decoded.length))
+                throw new Error((0, i18n_1.t)("matrixDamaged"));
         }
         const found = [];
         for (const file of this.app.vault.getMarkdownFiles()) {
@@ -962,10 +1197,26 @@ class MatrixStore {
         return found[0];
     }
     async loadMatrix(file, id) {
-        const blocks = (0, core_1.readMatrixBlocks)(await this.app.vault.cachedRead(file)).filter(b => b.matrix.id === id);
-        if (blocks.length !== 1)
-            throw new Error((0, i18n_1.t)("matrixCorrupt"));
-        return blocks[0].matrix;
+        const content = await this.app.vault.cachedRead(file);
+        const decoded = (0, core_1.readMatrixBlocks)(content);
+        const blocks = decoded.filter(b => b.matrix.id === id);
+        if (blocks.length === 1)
+            return blocks[0].matrix;
+        // A fence that does not decode is damaged, not a generic missing/corrupt mix. Never write here.
+        if (this.damagedMatrixFence(content, decoded.length))
+            throw new Error((0, i18n_1.t)("matrixDamaged"));
+        throw new Error((0, i18n_1.t)("matrixCorrupt"));
+    }
+    /** True when an eisenhower-matrix opener did not survive readMatrixBlocks (malformed JSON or a conflict). */
+    damagedMatrixFence(content, decodedCount) {
+        if (!content.includes("```eisenhower-matrix"))
+            return false;
+        let openings = 0;
+        for (const line of content.split(/\r?\n/)) {
+            if (/^```eisenhower-matrix[ \t]*$/.test(line))
+                openings++;
+        }
+        return openings > decodedCount;
     }
     async updateMatrix(file, id, change) {
         await this.app.vault.process(file, current => (0, core_1.replaceMatrixBlock)(current, id, change));
@@ -982,7 +1233,11 @@ class MatrixStore {
         const folder = this.app.vault.getAbstractFileByPath(source.path);
         if (!(folder instanceof obsidian_1.TFolder))
             throw new Error((0, i18n_1.t)("folderMissing", "auto", { path: source.path }));
-        return this.app.vault.getMarkdownFiles().filter(f => (0, core_1.isPathInside)(f.path, source.path, source.recursive));
+        return this.app.vault.getMarkdownFiles().filter(f => {
+            if (!(0, core_1.isPathInside)(f.path, source.path, source.recursive))
+                return false;
+            return !excludedBelowSource(f.path, source.path);
+        });
     }
     async loadTasks(source) {
         const files = await this.sourceFiles(source);
@@ -1003,13 +1258,11 @@ class MatrixStore {
                         candidateIndices.push(i);
             }
             else {
-                // Prefer exact physical line; when it moved, require a unique exact match.
-                if (lines[task.line] === task.raw)
-                    candidateIndices.push(task.line);
-                else
-                    for (let i = 0; i < lines.length; i++)
-                        if (lines[i] === task.raw)
-                            candidateIndices.push(i);
+                // No anchor: edit only a unique exact line. A repeated raw line is ambiguous
+                // even when the recorded line number still matches one of the copies.
+                for (let i = 0; i < lines.length; i++)
+                    if (lines[i] === task.raw)
+                        candidateIndices.push(i);
             }
             if (candidateIndices.length !== 1)
                 throw new Error((0, i18n_1.t)("taskChanged"));
@@ -1030,6 +1283,9 @@ class MatrixStore {
         const normalized = text.trim();
         if (!normalized || /[\r\n]/.test(normalized))
             throw new Error((0, i18n_1.t)("singleLineTask"));
+        const blockToken = findBlockToken(normalized);
+        if (blockToken)
+            throw new Error((0, i18n_1.t)("blockTokenInText", "auto", { token: blockToken }));
         let path;
         if (config.source.kind === "file")
             path = config.source.path;
@@ -1040,13 +1296,20 @@ class MatrixStore {
             if (!path.endsWith(".md") || !(0, core_1.isPathInside)(path, config.source.path, config.source.recursive))
                 throw new Error((0, i18n_1.t)("taskFileOutside"));
         }
+        // Same predicate as sourceFiles: do not append into a note the matrix will never list.
+        if (excludedBelowSource(path, config.source.path))
+            throw new Error((0, i18n_1.t)("taskFileOutside"));
         const id = (0, types_1.newId)();
         const file = this.app.vault.getAbstractFileByPath(path);
         if (!(file instanceof obsidian_1.TFile) || file.extension !== "md")
             throw new Error((0, i18n_1.t)("existingFileMissing", "auto", { path }));
         await this.app.vault.process(file, current => {
             const eol = current.includes("\r\n") ? "\r\n" : "\n";
-            return current + (current.length && !current.endsWith("\n") ? eol : "") + `- [ ] ${normalized} ^${id}${eol}`;
+            const next = current + (current.length && !current.endsWith("\n") ? eol : "") + `- [ ] ${normalized} ^${id}${eol}`;
+            // Throwing here aborts the write, so an invisible task is never appended.
+            if (!(0, core_1.scanMarkdown)(next, path).some(task => task.anchor === id))
+                throw new Error((0, i18n_1.t)("taskNotVisibleAfterAdd"));
+            return next;
         });
         return id;
     }
@@ -1072,6 +1335,8 @@ class MatrixStore {
                 return newPath + original.slice(oldPath.length);
             return original;
         };
+        let failed = 0;
+        const reasons = [];
         for (const file of this.app.vault.getMarkdownFiles()) {
             const txt = await this.app.vault.cachedRead(file);
             if (!txt.includes("```eisenhower-matrix"))
@@ -1081,11 +1346,20 @@ class MatrixStore {
                 const inbox = redirect(block.matrix.inboxFile);
                 if (sourcePath === block.matrix.source.path && inbox === block.matrix.inboxFile)
                     continue;
-                await this.updateMatrix(file, block.matrix.id, state => ({
-                    ...state, source: { ...state.source, path: redirect(state.source.path) }, inboxFile: redirect(state.inboxFile)
-                }));
+                try {
+                    await this.updateMatrix(file, block.matrix.id, state => ({
+                        ...state, source: { ...state.source, path: redirect(state.source.path) }, inboxFile: redirect(state.inboxFile)
+                    }));
+                }
+                catch (error) {
+                    // One matrix must not stop the rest. Successful writes above stay on disk.
+                    failed++;
+                    reasons.push(error instanceof Error ? error.message : String(error));
+                }
             }
         }
+        if (failed > 0)
+            throw new Error((0, i18n_1.t)("renamePartial", "auto", { error: `${failed} failed: ${reasons.join("; ")}` }));
     }
 }
 exports.MatrixStore = MatrixStore;
@@ -1139,41 +1413,73 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
         this.preferredPath = preferredPath;
         this.tasks = [];
         this.active = "do";
-        this.busy = false;
+        this.actionTail = Promise.resolve();
+        this.actionDepth = 0;
+        this.unloaded = false;
         this.completedOpen = false;
         this.serial = 0;
         this.seenDuplicateIds = new Set();
+        /** One parent for MarkdownRenderer children of the current draw. Replaced on each render. */
+        this.renderComponent = new obsidian_1.Component();
         root.addClass("em-root");
     }
     onload() {
-        this.registerEvent(this.host.app.vault.on("modify", () => this.scheduleRefresh()));
-        this.registerEvent(this.host.app.vault.on("create", () => this.scheduleRefresh()));
-        this.registerEvent(this.host.app.vault.on("delete", () => this.scheduleRefresh()));
-        this.registerEvent(this.host.app.vault.on("rename", () => this.scheduleRefresh()));
+        this.registerEvent(this.host.app.vault.on("modify", file => { this.onVaultFile(file); }));
+        this.registerEvent(this.host.app.vault.on("create", file => { this.onVaultFile(file); }));
+        this.registerEvent(this.host.app.vault.on("delete", file => { this.onVaultFile(file); }));
+        this.registerEvent(this.host.app.vault.on("rename", (file, oldPath) => { this.onVaultFile(file, oldPath); }));
         void this.refresh();
     }
     onunload() {
+        this.unloaded = true;
         this.serial++;
         if (this.timer !== undefined)
             window.clearTimeout(this.timer);
+        this.timer = undefined;
+        this.renderComponent.unload();
+    }
+    /** Matrix note, configured source, or a still-unloaded config. Rename checks both paths. */
+    onVaultFile(file, oldPath) {
+        if (this.pathAffectsView(file?.path) || (oldPath !== undefined && this.pathAffectsView(oldPath)))
+            this.scheduleRefresh();
+    }
+    pathAffectsView(path) {
+        if (!this.config || path === undefined)
+            return true;
+        if (path === this.file?.path || path === this.preferredPath)
+            return true;
+        const source = this.config.source;
+        if (source.kind === "file")
+            return path === source.path;
+        // isPathInside is false for the folder path itself. Creating, deleting, or renaming that folder still refreshes.
+        return (0, core_1.normalizeVaultPath)(path) === (0, core_1.normalizeVaultPath)(source.path)
+            || (0, core_1.isPathInside)(path, source.path, source.recursive);
     }
     scheduleRefresh(delay = 200) {
+        if (this.unloaded)
+            return;
         if (this.timer !== undefined)
             window.clearTimeout(this.timer);
-        this.timer = window.setTimeout(() => { this.timer = undefined; if (!this.busy)
-            void this.refresh(); }, delay);
+        this.timer = window.setTimeout(() => {
+            this.timer = undefined;
+            if (this.unloaded || this.actionDepth > 0)
+                return;
+            void this.refresh();
+        }, delay);
     }
     async refresh() {
+        if (this.unloaded)
+            return;
         const serial = ++this.serial;
         try {
             const file = await this.host.store.findMatrix(this.id, this.file?.path || this.preferredPath);
             const config = await this.host.store.loadMatrix(file, this.id);
-            if (serial !== this.serial)
+            if (serial !== this.serial || this.unloaded)
                 return;
             this.file = file;
             this.config = config; // Allow source settings to be fixed even if the source is missing.
             const tasks = await this.host.store.loadTasks(config.source);
-            if (serial !== this.serial)
+            if (serial !== this.serial || this.unloaded)
                 return;
             this.tasks = tasks;
             const count = new Map();
@@ -1184,7 +1490,7 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
             this.render();
         }
         catch (e) {
-            if (serial !== this.serial)
+            if (serial !== this.serial || this.unloaded)
                 return;
             this.root.empty();
             const error = this.root.createDiv({ cls: "em-error" });
@@ -1206,20 +1512,23 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
         console.error("[Eisenhower Folder Matrix]", error);
         new obsidian_1.Notice(error instanceof Error ? error.message : String(error), 8000);
     }
-    async action(operation) {
-        if (this.busy)
-            return;
-        this.busy = true;
-        try {
-            await operation();
-        }
-        catch (e) {
-            this.notify(e);
-        }
-        finally {
-            this.busy = false;
-            this.scheduleRefresh(70);
-        }
+    action(operation) {
+        this.actionDepth++;
+        const job = this.actionTail.then(async () => {
+            try {
+                await operation();
+            }
+            catch (e) {
+                this.notify(e);
+            }
+            finally {
+                this.actionDepth--;
+                if (this.actionDepth === 0)
+                    this.scheduleRefresh(70);
+            }
+        });
+        this.actionTail = job.then(() => undefined, () => undefined);
+        return job;
     }
     requireConfig() {
         if (!this.file || !this.config)
@@ -1236,7 +1545,9 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
             const { file } = this.requireConfig();
             let id;
             try {
-                id = task.anchor || await this.host.store.editTask(task, {});
+                // Anchored lines keep Task.id as the matrix key (path#^id for a foreign anchor).
+                // A quadrant move must not rewrite a line that already has its anchor.
+                id = task.anchor ? task.id : await this.host.store.editTask(task, {});
             }
             catch (error) {
                 throw new Error(this.tr("attachTaskError", { error: error instanceof Error ? error.message : String(error) }));
@@ -1255,11 +1566,13 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
             const id = await this.host.store.editTask(task, change);
             if (change.remove) {
                 const { file } = this.requireConfig();
+                const keys = new Set([task.id, id]);
                 await this.host.store.updateMatrix(file, this.id, current => {
                     const next = { ...current, assignments: { ...current.assignments }, order: { ...current.order } };
-                    delete next.assignments[id];
+                    for (const key of keys)
+                        delete next.assignments[key];
                     for (const zone of types_1.ZONES)
-                        next.order[zone] = next.order[zone].filter(x => x !== id);
+                        next.order[zone] = next.order[zone].filter(x => !keys.has(x));
                     return next;
                 });
             }
@@ -1301,6 +1614,9 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
         }).open();
     }
     render() {
+        this.renderComponent.unload();
+        this.renderComponent = new obsidian_1.Component();
+        this.renderComponent.load();
         const config = this.config;
         const root = this.root;
         root.empty();
@@ -1383,8 +1699,9 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
             .onClick(() => this.editTask(task)));
         menu.addItem(item => item.setTitle(this.tr("openSource")).setIcon("file-text")
             .onClick(() => { void this.host.openTask(task).catch(err => this.notify(err)); }));
+        const childCount = this.tasks.filter(t => t.parentId === task.id).length;
         menu.addItem(item => item.setTitle(this.tr("deleteTask")).setIcon("trash-2")
-            .onClick(() => new modals_1.ConfirmDeleteModal(this.host.app, task.text, () => this.changeTask(task, { remove: true }), this.config?.language).open()));
+            .onClick(() => new modals_1.ConfirmDeleteModal(this.host.app, task.text, () => this.changeTask(task, { remove: true }), this.config?.language, childCount).open()));
         menu.showAtMouseEvent(event);
     }
     makeCard(holder, task, depth, zone) {
@@ -1416,16 +1733,16 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
         }
         else
             row.createSpan({ text: "•", cls: "em-grip-muted" });
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
+        const checkbox = row.createEl("input", {
+            type: "checkbox",
+            attr: { "aria-label": task.done ? this.tr("markOpen") : this.tr("markDone") }
+        });
         checkbox.checked = task.done;
-        checkbox.setAttribute("aria-label", task.done ? this.tr("markOpen") : this.tr("markDone"));
-        row.appendChild(checkbox);
         this.bind(checkbox, "change", () => void this.changeTask(task, { done: checkbox.checked }));
         const content = row.createDiv({ cls: "em-card-content" });
         const textEl = content.createDiv({ cls: "em-card-text" });
         // Render links, bold text and Obsidian ==highlights== as Markdown, not raw markers.
-        void obsidian_1.MarkdownRenderer.render(this.host.app, task.text, textEl, task.path, this)
+        void obsidian_1.MarkdownRenderer.render(this.host.app, task.text, textEl, task.path, this.renderComponent)
             .catch(() => { textEl.setText(task.text); });
         const basename = task.path.split("/").pop() || task.path;
         const sourceLabel = task.group ? `${task.group} · ${basename}` : basename;
@@ -1454,15 +1771,30 @@ class MatrixView extends obsidian_1.MarkdownRenderChild {
     renderCompleted(root) {
         const done = this.tasks.filter(t => t.done).sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
         const details = root.createEl("details", { cls: "em-completed" });
-        details.open = this.completedOpen; // false by default, remember user's toggle while view is open
-        this.bind(details, "toggle", () => { this.completedOpen = details.open; });
         const summary = details.createEl("summary");
         summary.createSpan({ text: "✓ " + this.tr("completed", { count: done.length }) });
-        if (!done.length)
-            details.createDiv({ text: this.tr("noCompleted"), cls: "em-empty" });
-        const list = details.createDiv({ cls: "em-completed-list" });
-        for (const task of done)
-            this.makeCard(list, task, 0);
+        let rendered = false;
+        const showDone = () => {
+            if (rendered)
+                return;
+            rendered = true;
+            if (!done.length) {
+                details.createDiv({ text: this.tr("noCompleted"), cls: "em-empty" });
+                return;
+            }
+            const list = details.createDiv({ cls: "em-completed-list" });
+            for (const task of done)
+                this.makeCard(list, task, 0);
+        };
+        // Remember the open state, but skip Markdown cards until the section is actually open.
+        this.bind(details, "toggle", () => {
+            this.completedOpen = details.open;
+            if (details.open)
+                showDone();
+        });
+        details.open = this.completedOpen;
+        if (details.open)
+            showDone();
     }
 }
 exports.MatrixView = MatrixView;

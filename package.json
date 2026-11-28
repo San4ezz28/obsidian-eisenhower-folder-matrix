@@ -1,6 +1,6 @@
 {
   "name": "eisenhower-folder-matrix",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "private": true,
   "description": "Portable markdown Eisenhower matrices for Obsidian",
   "author": "San4ezz28",
@@ -8,10 +8,10 @@
   "scripts": {
     "build": "tsc --noEmit --skipLibCheck && node scripts/build.cjs",
     "bundle": "node scripts/build.cjs",
-    "test": "node tests/core.test.cjs && node tests/store.test.cjs && node tests/modal.test.cjs && node tests/regressions.test.cjs && node tests/i18n.test.cjs"
+    "test": "node tests/core.test.cjs && node tests/store.test.cjs && node tests/modal.test.cjs && node tests/regressions.test.cjs && node tests/i18n.test.cjs && node tests/view.test.cjs"
   },
   "devDependencies": {
-    "obsidian": "latest",
+    "obsidian": "1.14.4",
     "typescript": "^5.8.3"
   }
 }

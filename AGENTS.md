@@ -5,7 +5,7 @@ This is a **mobile-compatible Obsidian plugin**. Work in the source files under 
 ## Invariants
 
 1. A matrix is a movable Markdown note containing a fenced `eisenhower-matrix` JSON block. Preserve its `id`, `version: 1`, existing fields, assignments and task ordering. Older notes may lack the `language` field; default to `auto` rather than migrating destructively.
-2. A matrix scans **one configured folder (with optional recursion) or one configured Markdown file**. Never expand the source scope to the whole vault without explicit user choice.
+2. A matrix scans **one configured folder (with optional recursion) or one configured Markdown file**. Never expand the source scope to the whole vault without explicit user choice. Skip a `_fit` segment (any case) and a dot-segment only when they sit below the source root. If the user selected that folder as the source, scan it.
 3. Users write plain `- [ ]` and `- [x]` tasks, including in Obsidian callouts (`> - [ ]`) and nested lists. No forced tags, task priorities, or dates.
 4. New tasks appear in **Inbox**, not Eliminate. Completed tasks remain in their original Markdown sources and appear in Completed, which is collapsed by default. Reopening restores their old quadrant.
 5. Subtask display has three per-matrix modes: separate, nested, hidden; completed subtasks remain visible in Completed.
@@ -14,6 +14,7 @@ This is a **mobile-compatible Obsidian plugin**. Work in the source files under 
 8. All runtime functionality must work offline on Obsidian desktop and mobile. No Electron-only or Node-only runtime APIs in `src`. Use Obsidian native controls and touch-friendly menus.
 9. FIT (File gIT) syncs ordinary Markdown; put portable matrix state in the matrix note, not only `.obsidian/plugins/*/data.json`. Do not claim conflict-free multi-device merges; test concurrent edits explicitly.
 10. Never publish or commit a user's vault, personal notes, access tokens or `.obsidian/` secrets. GitHub repository contains only plugin source, tests and documentation.
+11. A single `^em-` token anywhere on a task line is the stable id. A foreign block id counts only as the last token, is kept as written, and is keyed in the matrix as `path#^id`. Do not append a second id. Abort when a line has two `^em-` tokens, when new text introduces a block token the line did not already show, or when two identical unanchored lines match. A mid-line `^word` is not an anchor. Unknown JSON fields on the matrix and on `source` survive writes. Do not overwrite a matrix block that fails to parse.
 
 ## Development workflow
 
